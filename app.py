@@ -1,63 +1,37 @@
+
 from flask import Flask, render_template, jsonify
 import requests
 import threading
 import time
+import math
 
 app = Flask(__name__)
 
-API_URL = "https://signal-api-cp14.onrender.com"
+# ----------------------------
+# CONFIG
+# ----------------------------
+API_URL = "https://signal-api-cp14.onrender.com/signals"
+CACHE_TTL = 30  # seconds
 
-# ----------------------------
-# GLOBAL CACHE (IMPORTANT)
-# ----------------------------
 CACHE = {
     "data": [],
     "last_update": 0
 }
 
-CACHE_TTL = 30  # seconds
+# Prevent multiple threads in Gunicorn
+thread_started = False
 
 
 # ----------------------------
-# BACKGROUND REFRESH WORKER
+# SIGNAL ENGINE (INLINE)
 # ----------------------------
-def refresh_cache():
-    while True:
-        try:
-            print("Refreshing signal cache...")
-
-            r = requests.get(API_URL, timeout=25)
-
-            if r.status_code == 200:
-                data = r.json()
-
-                if isinstance(data, dict):
-                    data = [data]
-
-                if isinstance(data, list):
-                    CACHE["data"] = data
-                    CACHE["last_update"] = time.time()
-
-        except Exception as e:
-            print("Cache refresh error:", e)
-
-        time.sleep(CACHE_TTL)
-
-
-# Start background thread ONCE
-threading.Thread(target=refresh_cache, daemon=True).start()
-
-
-# ----------------------------
-# ENRICH FUNCTION (safe + lightweight)
-# ----------------------------
-def enrich(s):
+def compute_signal(stock):
     try:
-        price = float(s.get("price", 0))
-        score = float(s.get("score", 0))
-        signal = s.get("signal", "HOLD")
+        price = float(stock.get("price", 0))
+        score = float(stock.get("score", 0))
+        volume = float(stock.get("volume", 0))
 
-        confidence = min(100, max(0, abs(score)))
+        momentum = score * (1 + math.log1p(volume))
 
         if price < 1:
             risk = "HIGH"
@@ -66,62 +40,110 @@ def enrich(s):
         else:
             risk = "LOW"
 
-        if confidence < 30:
+        confidence = max(0, min(100, abs(momentum)))
+
+        if confidence > 70 and momentum > 0:
+            signal = "BUY"
+        elif confidence < 30:
+            signal = "HOLD"
+        else:
             signal = "HOLD"
 
         return {
-            "ticker": s.get("ticker", "UNKNOWN"),
+            "ticker": stock.get("ticker", "UNKNOWN"),
             "price": round(price, 4),
             "score": round(score, 2),
-            "signal": signal,
+            "momentum": round(momentum, 2),
             "confidence": round(confidence, 1),
-            "risk": risk
+            "risk": risk,
+            "signal": signal
         }
 
-    except:
+    except Exception:
         return {
             "ticker": "ERROR",
             "price": 0,
             "score": 0,
-            "signal": "HOLD",
+            "momentum": 0,
             "confidence": 0,
-            "risk": "HIGH"
+            "risk": "HIGH",
+            "signal": "HOLD"
         }
 
 
 # ----------------------------
-# INSTANT DASHBOARD (NO WAIT)
+# SAFE API FETCH
 # ----------------------------
+def fetch_signals():
+    try:
+        r = requests.get(API_URL, timeout=20)
+
+        if r.status_code != 200:
+            print("API error:", r.status_code, r.text)
+            return []
+
+        try:
+            data = r.json()
+        except ValueError:
+            print("Invalid JSON response:", r.text)
+            return []
+
+        if isinstance(data, dict):
+            data = [data]
+
+        if not isinstance(data, list):
+            return []
+
+        return [compute_signal(x) for x in data]
+
+    except Exception as e:
+        print("Fetch error:", e)
+        return []
+
+
+# ----------------------------
+# BACKGROUND CACHE WORKER
+# ----------------------------
+def refresh_cache():
+    while True:
+        print("Refreshing signal cache...")
+        CACHE["data"] = fetch_signals()
+        CACHE["last_update"] = time.time()
+        time.sleep(CACHE_TTL)
+
+
+# ----------------------------
+# START THREAD SAFELY
+# ----------------------------
+if not thread_started:
+    thread = threading.Thread(target=refresh_cache, daemon=True)
+    thread.start()
+    thread_started = True
+
+
+# ----------------------------
+# ROUTES
+# ----------------------------
+
 @app.route("/")
 def dashboard():
     data = CACHE["data"]
-
-    enriched = [enrich(s) for s in data]
-    enriched.sort(key=lambda x: x["score"], reverse=True)
-
-    return render_template("index.html", stocks=enriched)
+    data.sort(key=lambda x: x.get("momentum", 0), reverse=True)
+    return render_template("index.html", stocks=data)
 
 
-# ----------------------------
-# API VIEW (FAST CACHE RESPONSE)
-# ----------------------------
 @app.route("/api")
 def api():
-    data = CACHE["data"]
-    enriched = [enrich(s) for s in data]
-    return jsonify(enriched)
+    return jsonify(CACHE["data"])
 
 
-# ----------------------------
-# HEALTH CHECK
-# ----------------------------
 @app.route("/health")
 def health():
-    return {
+    return jsonify({
         "status": "ok",
         "cached_items": len(CACHE["data"]),
         "last_update": CACHE["last_update"]
-    }
+    })
 
 
 # ----------------------------
