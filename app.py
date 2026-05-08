@@ -1,111 +1,131 @@
 from flask import Flask, render_template, jsonify
 import requests
-import math
+import threading
+import time
 
 app = Flask(__name__)
 
-API_URL = "https://signal-api-cp14.onrender.com/signals"
+API_URL = "https://signal-api-cp14.onrender.com"
+
+# ----------------------------
+# GLOBAL CACHE (IMPORTANT)
+# ----------------------------
+CACHE = {
+    "data": [],
+    "last_update": 0
+}
+
+CACHE_TTL = 30  # seconds
 
 
 # ----------------------------
-# SAFE DATA FETCH
+# BACKGROUND REFRESH WORKER
 # ----------------------------
-def fetch_signals():
+def refresh_cache():
+    while True:
+        try:
+            print("Refreshing signal cache...")
+
+            r = requests.get(API_URL, timeout=25)
+
+            if r.status_code == 200:
+                data = r.json()
+
+                if isinstance(data, dict):
+                    data = [data]
+
+                if isinstance(data, list):
+                    CACHE["data"] = data
+                    CACHE["last_update"] = time.time()
+
+        except Exception as e:
+            print("Cache refresh error:", e)
+
+        time.sleep(CACHE_TTL)
+
+
+# Start background thread ONCE
+threading.Thread(target=refresh_cache, daemon=True).start()
+
+
+# ----------------------------
+# ENRICH FUNCTION (safe + lightweight)
+# ----------------------------
+def enrich(s):
     try:
-        r = requests.get(API_URL, timeout=10)
-        data = r.json()
+        price = float(s.get("price", 0))
+        score = float(s.get("score", 0))
+        signal = s.get("signal", "HOLD")
 
-        if isinstance(data, dict):
-            data = [data]
+        confidence = min(100, max(0, abs(score)))
 
-        if not isinstance(data, list):
-            return []
+        if price < 1:
+            risk = "HIGH"
+        elif price < 10:
+            risk = "MEDIUM"
+        else:
+            risk = "LOW"
 
-        return data
+        if confidence < 30:
+            signal = "HOLD"
 
-    except Exception as e:
-        print("API fetch error:", e)
-        return []
+        return {
+            "ticker": s.get("ticker", "UNKNOWN"),
+            "price": round(price, 4),
+            "score": round(score, 2),
+            "signal": signal,
+            "confidence": round(confidence, 1),
+            "risk": risk
+        }
 
-
-# ----------------------------
-# INSTITUTIONAL-STYLE ENRICHMENT
-# ----------------------------
-def enrich_signal(s):
-    price = float(s.get("price", 0))
-    score = float(s.get("score", 0))
-    signal = s.get("signal", "HOLD")
-
-    # ---- Confidence model (scaled score)
-    confidence = min(100, max(0, abs(score)))
-
-    # ---- Risk model (simple but effective)
-    if price < 1:
-        risk = "HIGH"
-    elif price < 10:
-        risk = "MEDIUM"
-    else:
-        risk = "LOW"
-
-    # ---- Adjust signal quality (stability filter)
-    if confidence < 30:
-        signal = "HOLD"
-
-    # ---- Institutional-style adjustment
-    adjusted_score = score
-
-    if risk == "HIGH":
-        adjusted_score *= 0.85  # penalize penny volatility
-
-    if signal == "BUY" and confidence < 40:
-        signal = "HOLD"
-
-    if signal == "SELL" and confidence < 40:
-        signal = "HOLD"
-
-    return {
-        "ticker": s.get("ticker", "UNKNOWN"),
-        "price": round(price, 4),
-        "score": round(adjusted_score, 2),
-        "signal": signal,
-        "confidence": round(confidence, 1),
-        "risk": risk
-    }
+    except:
+        return {
+            "ticker": "ERROR",
+            "price": 0,
+            "score": 0,
+            "signal": "HOLD",
+            "confidence": 0,
+            "risk": "HIGH"
+        }
 
 
 # ----------------------------
-# ROUTES
+# INSTANT DASHBOARD (NO WAIT)
 # ----------------------------
-
 @app.route("/")
 def dashboard():
-    raw = fetch_signals()
-    enriched = [enrich_signal(s) for s in raw]
+    data = CACHE["data"]
 
-    # Sort by strongest signal first
+    enriched = [enrich(s) for s in data]
     enriched.sort(key=lambda x: x["score"], reverse=True)
 
     return render_template("index.html", stocks=enriched)
 
 
+# ----------------------------
+# API VIEW (FAST CACHE RESPONSE)
+# ----------------------------
 @app.route("/api")
 def api():
-    raw = fetch_signals()
-    enriched = [enrich_signal(s) for s in raw]
+    data = CACHE["data"]
+    enriched = [enrich(s) for s in data]
     return jsonify(enriched)
 
 
+# ----------------------------
+# HEALTH CHECK
+# ----------------------------
 @app.route("/health")
 def health():
     return {
         "status": "ok",
-        "service": "AI Trading Dashboard",
-        "signals_loaded": len(fetch_signals())
+        "cached_items": len(CACHE["data"]),
+        "last_update": CACHE["last_update"]
     }
 
 
 # ----------------------------
-# MAIN
+# RUN
 # ----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
