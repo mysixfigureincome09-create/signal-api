@@ -1,0 +1,69 @@
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #0b0f1a;
+    color: white;
+}
+
+.header {
+    text-align: center;
+    padding: 20px;
+    background: #111827;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 15px;
+    padding: 20px;
+}
+
+.card {
+    background: #111827;
+    border-radius: 15px;
+    padding: 15px;
+    box-shadow: 0 0 15px rgba(0,0,0,0.5);
+    transition: 0.2s;
+}
+
+.card:hover {
+    transform: scale(1.02);
+}
+
+.top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.price {
+    font-size: 24px;
+    margin: 10px 0;
+}
+
+.score {
+    opacity: 0.7;
+}
+
+/* SIGNAL COLORS */
+.BUY {
+    border: 2px solid #00ff88;
+}
+
+.SELL {
+    border: 2px solid #ff3b3b;
+}
+
+.HOLD {
+    border: 2px solid #facc15;
+}
+
+.badge {
+    padding: 5px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+}
+
+.badge.BUY { background: #00ff88; color: black; }
+.badge.SELL { background: #ff3b3b; }
+.badge.HOLD { background: #facc15; color: black; }
