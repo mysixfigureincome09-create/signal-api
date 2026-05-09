@@ -11,7 +11,7 @@ app = Flask(__name__)
 # ----------------------------
 # CONFIG
 # ----------------------------
-API_URL = "https://signal-api-cp14.onrender.com/signals"
+API_URL = "https://signal-api-cp14.onrender.com"
 CACHE_TTL = 30  # seconds
 
 # ----------------------------
