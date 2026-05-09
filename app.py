@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, jsonify, render_template_string
 import requests
 import threading
 import time
@@ -8,23 +8,28 @@ import logging
 
 app = Flask(__name__)
 
-# ----------------------------
+# =====================================================
 # CONFIG
-# ----------------------------
-API_URL = "https://signal-api-cp14.onrender.com"
-CACHE_TTL = 30  # seconds
+# =====================================================
 
-# ----------------------------
+# CHANGE THIS TO YOUR API URL
+API_URL = "https://signal-api-cp14.onrender.com"
+
+CACHE_TTL = 30
+
+# =====================================================
 # LOGGING
-# ----------------------------
+# =====================================================
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-# ----------------------------
-# GLOBAL CACHE
-# ----------------------------
+# =====================================================
+# CACHE
+# =====================================================
+
 CACHE = {
     "data": [],
     "last_update": 0
@@ -32,23 +37,135 @@ CACHE = {
 
 cache_lock = threading.Lock()
 
-# Prevent duplicate threads
-thread_started = False
+# =====================================================
+# HTML TEMPLATE
+# =====================================================
 
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Trading Dashboard</title>
 
-# ----------------------------
+    <meta http-equiv="refresh" content="30">
+
+    <style>
+        body{
+            background:#0f172a;
+            color:white;
+            font-family:Arial;
+            padding:20px;
+        }
+
+        h1{
+            color:#38bdf8;
+        }
+
+        .card{
+            background:#1e293b;
+            padding:20px;
+            margin-bottom:15px;
+            border-radius:10px;
+            border:1px solid #334155;
+        }
+
+        .buy{
+            color:#22c55e;
+            font-weight:bold;
+        }
+
+        .sell{
+            color:#ef4444;
+            font-weight:bold;
+        }
+
+        .hold{
+            color:#facc15;
+            font-weight:bold;
+        }
+
+        .small{
+            color:#94a3b8;
+            font-size:12px;
+        }
+    </style>
+</head>
+
+<body>
+
+<h1>📈 AI Trading Dashboard</h1>
+
+<p class="small">
+Auto-refresh every 30 seconds
+</p>
+
+{% if stocks %}
+
+    {% for stock in stocks %}
+
+    <div class="card">
+
+        <h2>{{ stock.ticker }}</h2>
+
+        <p>Price: ${{ stock.price }}</p>
+
+        <p>Momentum: {{ stock.momentum }}</p>
+
+        <p>Confidence: {{ stock.confidence }}%</p>
+
+        <p>Risk: {{ stock.risk }}</p>
+
+        <p>
+            Signal:
+
+            {% if stock.signal == "BUY" %}
+                <span class="buy">BUY</span>
+            {% elif stock.signal == "SELL" %}
+                <span class="sell">SELL</span>
+            {% else %}
+                <span class="hold">HOLD</span>
+            {% endif %}
+        </p>
+
+    </div>
+
+    {% endfor %}
+
+{% else %}
+
+    <div class="card">
+        <h2>No Data Available</h2>
+
+        <p>
+        Your API may be offline or returning invalid JSON.
+        </p>
+    </div>
+
+{% endif %}
+
+</body>
+</html>
+"""
+
+# =====================================================
 # SIGNAL ENGINE
-# ----------------------------
+# =====================================================
+
 def compute_signal(stock):
     try:
+
+        ticker = stock.get("ticker", "UNKNOWN")
+
         price = float(stock.get("price", 0) or 0)
+
         score = float(stock.get("score", 0) or 0)
+
         volume = float(stock.get("volume", 0) or 0)
 
-        # Momentum formula
         momentum = score * (1 + math.log1p(max(volume, 0)))
 
-        # Risk levels
+        confidence = max(0, min(100, abs(momentum)))
+
         if price < 1:
             risk = "HIGH"
         elif price < 10:
@@ -56,10 +173,6 @@ def compute_signal(stock):
         else:
             risk = "LOW"
 
-        # Confidence score
-        confidence = max(0, min(100, abs(momentum)))
-
-        # Trading signal
         if momentum > 0 and confidence >= 70:
             signal = "BUY"
         elif momentum < 0 and confidence >= 70:
@@ -68,7 +181,7 @@ def compute_signal(stock):
             signal = "HOLD"
 
         return {
-            "ticker": stock.get("ticker", "UNKNOWN"),
+            "ticker": ticker,
             "price": round(price, 4),
             "score": round(score, 2),
             "volume": int(volume),
@@ -79,7 +192,8 @@ def compute_signal(stock):
         }
 
     except Exception as e:
-        logging.error(f"Signal compute error: {e}")
+
+        logging.error(f"compute_signal error: {e}")
 
         return {
             "ticker": "ERROR",
@@ -92,116 +206,117 @@ def compute_signal(stock):
             "signal": "HOLD"
         }
 
+# =====================================================
+# FETCH API DATA
+# =====================================================
 
-# ----------------------------
-# FETCH SIGNALS
-# ----------------------------
 def fetch_signals():
+
     try:
-        logging.info(f"Fetching signals from {API_URL}")
+
+        logging.info(f"Fetching: {API_URL}")
 
         response = requests.get(API_URL, timeout=20)
 
+        logging.info(f"STATUS CODE: {response.status_code}")
+
         if response.status_code != 200:
-            logging.error(
-                f"API error {response.status_code}: {response.text}"
-            )
+
+            logging.error(response.text)
+
             return []
 
         try:
             data = response.json()
+
         except Exception:
-            logging.error("Invalid JSON response")
+
+            logging.error("INVALID JSON RESPONSE")
             logging.error(response.text)
+
             return []
 
-        # Normalize response
+        logging.info(f"RAW DATA: {data}")
+
         if isinstance(data, dict):
             data = [data]
 
         if not isinstance(data, list):
-            logging.error("API did not return a list")
+            logging.error("API did not return list")
             return []
 
-        processed = []
+        results = []
 
         for item in data:
+
             if isinstance(item, dict):
-                processed.append(compute_signal(item))
 
-        logging.info(f"Loaded {len(processed)} signals")
+                processed = compute_signal(item)
 
-        return processed
+                results.append(processed)
 
-    except requests.exceptions.Timeout:
-        logging.error("Request timeout")
-        return []
+        logging.info(f"Loaded {len(results)} stocks")
 
-    except requests.exceptions.ConnectionError:
-        logging.error("Connection error")
-        return []
+        return results
 
     except Exception as e:
-        logging.error(f"Fetch error: {e}")
+
+        logging.error(f"FETCH ERROR: {e}")
+
         return []
 
+# =====================================================
+# CACHE REFRESH THREAD
+# =====================================================
 
-# ----------------------------
-# CACHE REFRESH LOOP
-# ----------------------------
 def refresh_cache():
+
     while True:
+
         try:
-            logging.info("Refreshing signal cache...")
+
+            logging.info("Refreshing cache...")
 
             fresh_data = fetch_signals()
 
             with cache_lock:
+
                 CACHE["data"] = fresh_data
+
                 CACHE["last_update"] = time.time()
 
             logging.info("Cache updated")
 
         except Exception as e:
-            logging.error(f"Cache refresh error: {e}")
+
+            logging.error(f"CACHE ERROR: {e}")
 
         time.sleep(CACHE_TTL)
 
+# =====================================================
+# START THREAD
+# =====================================================
 
-# ----------------------------
-# START BACKGROUND THREAD
-# ----------------------------
-def start_background_thread():
-    global thread_started
+thread = threading.Thread(
+    target=refresh_cache,
+    daemon=True
+)
 
-    if not thread_started:
-        thread = threading.Thread(
-            target=refresh_cache,
-            daemon=True
-        )
-
-        thread.start()
-
-        thread_started = True
-
-        logging.info("Background cache thread started")
-
-
-# Start once
-start_background_thread()
+thread.start()
 
 # Initial preload
-with cache_lock:
-    CACHE["data"] = fetch_signals()
-    CACHE["last_update"] = time.time()
+CACHE["data"] = fetch_signals()
+CACHE["last_update"] = time.time()
 
-
-# ----------------------------
+# =====================================================
 # ROUTES
-# ----------------------------
+# =====================================================
+
 @app.route("/")
 def dashboard():
+
     with cache_lock:
+
         data = list(CACHE["data"])
 
     sorted_data = sorted(
@@ -210,32 +325,65 @@ def dashboard():
         reverse=True
     )
 
-    return render_template(
-        "index.html",
+    return render_template_string(
+        HTML,
         stocks=sorted_data
     )
 
-
 @app.route("/api")
 def api():
-    with cache_lock:
-        return jsonify(CACHE["data"])
 
+    with cache_lock:
+
+        return jsonify(CACHE["data"])
 
 @app.route("/health")
 def health():
+
     with cache_lock:
+
         return jsonify({
             "status": "ok",
             "cached_items": len(CACHE["data"]),
             "last_update": CACHE["last_update"]
         })
 
+# =====================================================
+# LOCAL TEST DATA
+# =====================================================
 
-# ----------------------------
+@app.route("/test")
+def test():
+
+    sample = [
+        {
+            "ticker": "NVDA",
+            "price": 120.55,
+            "score": 88,
+            "volume": 1000000
+        },
+        {
+            "ticker": "TSLA",
+            "price": 177.22,
+            "score": 72,
+            "volume": 2000000
+        },
+        {
+            "ticker": "PLTR",
+            "price": 28.12,
+            "score": 63,
+            "volume": 900000
+        }
+    ]
+
+    return jsonify(sample)
+
+# =====================================================
 # MAIN
-# ----------------------------
+# =====================================================
+
 if __name__ == "__main__":
+
     port = int(os.environ.get("PORT", 10000))
 
     app.run(
