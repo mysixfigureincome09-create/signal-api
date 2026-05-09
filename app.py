@@ -1,9 +1,10 @@
-
 from flask import Flask, render_template, jsonify
 import requests
 import threading
 import time
 import math
+import os
+import logging
 
 app = Flask(__name__)
 
@@ -13,26 +14,41 @@ app = Flask(__name__)
 API_URL = "https://signal-api-cp14.onrender.com/signals"
 CACHE_TTL = 30  # seconds
 
+# ----------------------------
+# LOGGING
+# ----------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+# ----------------------------
+# GLOBAL CACHE
+# ----------------------------
 CACHE = {
     "data": [],
     "last_update": 0
 }
 
-# Prevent multiple threads in Gunicorn
+cache_lock = threading.Lock()
+
+# Prevent duplicate threads
 thread_started = False
 
 
 # ----------------------------
-# SIGNAL ENGINE (INLINE)
+# SIGNAL ENGINE
 # ----------------------------
 def compute_signal(stock):
     try:
-        price = float(stock.get("price", 0))
-        score = float(stock.get("score", 0))
-        volume = float(stock.get("volume", 0))
+        price = float(stock.get("price", 0) or 0)
+        score = float(stock.get("score", 0) or 0)
+        volume = float(stock.get("volume", 0) or 0)
 
-        momentum = score * (1 + math.log1p(volume))
+        # Momentum formula
+        momentum = score * (1 + math.log1p(max(volume, 0)))
 
+        # Risk levels
         if price < 1:
             risk = "HIGH"
         elif price < 10:
@@ -40,12 +56,14 @@ def compute_signal(stock):
         else:
             risk = "LOW"
 
+        # Confidence score
         confidence = max(0, min(100, abs(momentum)))
 
-        if confidence > 70 and momentum > 0:
+        # Trading signal
+        if momentum > 0 and confidence >= 70:
             signal = "BUY"
-        elif confidence < 30:
-            signal = "HOLD"
+        elif momentum < 0 and confidence >= 70:
+            signal = "SELL"
         else:
             signal = "HOLD"
 
@@ -53,17 +71,21 @@ def compute_signal(stock):
             "ticker": stock.get("ticker", "UNKNOWN"),
             "price": round(price, 4),
             "score": round(score, 2),
+            "volume": int(volume),
             "momentum": round(momentum, 2),
             "confidence": round(confidence, 1),
             "risk": risk,
             "signal": signal
         }
 
-    except Exception:
+    except Exception as e:
+        logging.error(f"Signal compute error: {e}")
+
         return {
             "ticker": "ERROR",
             "price": 0,
             "score": 0,
+            "volume": 0,
             "momentum": 0,
             "confidence": 0,
             "risk": "HIGH",
@@ -72,82 +94,152 @@ def compute_signal(stock):
 
 
 # ----------------------------
-# SAFE API FETCH
+# FETCH SIGNALS
 # ----------------------------
 def fetch_signals():
     try:
-        r = requests.get(API_URL, timeout=20)
+        logging.info(f"Fetching signals from {API_URL}")
 
-        if r.status_code != 200:
-            print("API error:", r.status_code, r.text)
+        response = requests.get(API_URL, timeout=20)
+
+        if response.status_code != 200:
+            logging.error(
+                f"API error {response.status_code}: {response.text}"
+            )
             return []
 
         try:
-            data = r.json()
-        except ValueError:
-            print("Invalid JSON response:", r.text)
+            data = response.json()
+        except Exception:
+            logging.error("Invalid JSON response")
+            logging.error(response.text)
             return []
 
+        # Normalize response
         if isinstance(data, dict):
             data = [data]
 
         if not isinstance(data, list):
+            logging.error("API did not return a list")
             return []
 
-        return [compute_signal(x) for x in data]
+        processed = []
+
+        for item in data:
+            if isinstance(item, dict):
+                processed.append(compute_signal(item))
+
+        logging.info(f"Loaded {len(processed)} signals")
+
+        return processed
+
+    except requests.exceptions.Timeout:
+        logging.error("Request timeout")
+        return []
+
+    except requests.exceptions.ConnectionError:
+        logging.error("Connection error")
+        return []
 
     except Exception as e:
-        print("Fetch error:", e)
+        logging.error(f"Fetch error: {e}")
         return []
 
 
 # ----------------------------
-# BACKGROUND CACHE WORKER
+# CACHE REFRESH LOOP
 # ----------------------------
 def refresh_cache():
     while True:
-        print("Refreshing signal cache...")
-        CACHE["data"] = fetch_signals()
-        CACHE["last_update"] = time.time()
+        try:
+            logging.info("Refreshing signal cache...")
+
+            fresh_data = fetch_signals()
+
+            with cache_lock:
+                CACHE["data"] = fresh_data
+                CACHE["last_update"] = time.time()
+
+            logging.info("Cache updated")
+
+        except Exception as e:
+            logging.error(f"Cache refresh error: {e}")
+
         time.sleep(CACHE_TTL)
 
 
 # ----------------------------
-# START THREAD SAFELY
+# START BACKGROUND THREAD
 # ----------------------------
-if not thread_started:
-    thread = threading.Thread(target=refresh_cache, daemon=True)
-    thread.start()
-    thread_started = True
+def start_background_thread():
+    global thread_started
+
+    if not thread_started:
+        thread = threading.Thread(
+            target=refresh_cache,
+            daemon=True
+        )
+
+        thread.start()
+
+        thread_started = True
+
+        logging.info("Background cache thread started")
+
+
+# Start once
+start_background_thread()
+
+# Initial preload
+with cache_lock:
+    CACHE["data"] = fetch_signals()
+    CACHE["last_update"] = time.time()
 
 
 # ----------------------------
 # ROUTES
 # ----------------------------
-
 @app.route("/")
 def dashboard():
-    data = CACHE["data"]
-    data.sort(key=lambda x: x.get("momentum", 0), reverse=True)
-    return render_template("index.html", stocks=data)
+    with cache_lock:
+        data = list(CACHE["data"])
+
+    sorted_data = sorted(
+        data,
+        key=lambda x: x.get("momentum", 0),
+        reverse=True
+    )
+
+    return render_template(
+        "index.html",
+        stocks=sorted_data
+    )
 
 
 @app.route("/api")
 def api():
-    return jsonify(CACHE["data"])
+    with cache_lock:
+        return jsonify(CACHE["data"])
 
 
 @app.route("/health")
 def health():
-    return jsonify({
-        "status": "ok",
-        "cached_items": len(CACHE["data"]),
-        "last_update": CACHE["last_update"]
-    })
+    with cache_lock:
+        return jsonify({
+            "status": "ok",
+            "cached_items": len(CACHE["data"]),
+            "last_update": CACHE["last_update"]
+        })
 
 
 # ----------------------------
-# RUN
+# MAIN
 # ----------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False
+    )
