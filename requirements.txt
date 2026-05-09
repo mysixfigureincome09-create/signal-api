@@ -1,7 +1,6 @@
 flask
-requests
-pandas
 gunicorn
 yfinance
+pandas
 numpy
 textblob
