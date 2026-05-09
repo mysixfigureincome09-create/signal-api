@@ -2,3 +2,6 @@ flask
 requests
 pandas
 gunicorn
+yfinance
+numpy
+textblob
