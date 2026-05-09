@@ -1,197 +1,131 @@
-from flask import Flask, jsonify
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import os
-import time
-import threading
+from textblob import TextBlob
 
-app = Flask(__name__)
+TICKERS = ["NVDA", "TSLA", "AMD", "PLTR", "AAPL", "MSFT"]
 
-TICKERS = ["NVDA", "TSLA", "AMD", "PLTR"]
 
-CACHE = {
-    "prices": {},
-    "portfolio": {
-        "cash": 10000,
-        "positions": {},
-        "trades": []
-    }
-}
-
-# -----------------------------
+# -------------------------
 # INDICATORS
-# -----------------------------
+# -------------------------
 
-def rsi(series, period=14):
-    delta = series.diff()
+def rsi(df, period=14):
+    delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = -delta.clip(upper=0).rolling(period).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
 
-def volatility(series):
-    return series.pct_change().rolling(10).std()
+def candle_strength(df):
+    body = abs(df["Close"] - df["Open"])
+    range_ = df["High"] - df["Low"]
+    return body / (range_ + 1e-9)
 
 
-def momentum(series):
-    return series.pct_change().rolling(5).mean()
+def momentum(df):
+    return df["Close"].pct_change().rolling(5).mean()
 
 
-# -----------------------------
-# SIGNAL ENGINE (FUSION)
-# -----------------------------
+# -------------------------
+# SENTIMENT (SIMULATED AI SCRAPING LAYER)
+# -------------------------
 
-def generate_signal(df):
+def sentiment_score(ticker):
+    # placeholder for real news scraping
+    # replace with news API later
+    fake_news = f"{ticker} earnings growth strong outlook positive"
+    return TextBlob(fake_news).sentiment.polarity
+
+
+# -------------------------
+# SIGNAL ENGINE
+# -------------------------
+
+def analyze(df, ticker):
+
     df = df.copy()
 
-    df["rsi"] = rsi(df["Close"])
-    df["vol"] = volatility(df["Close"])
-    df["mom"] = momentum(df["Close"])
+    df["rsi"] = rsi(df)
+    df["mom"] = momentum(df)
+    df["candle"] = candle_strength(df)
 
     rsi_val = df["rsi"].iloc[-1]
     mom_val = df["mom"].iloc[-1]
-    vol_val = df["vol"].iloc[-1]
+    candle_val = df["candle"].iloc[-1]
+    price = df["Close"].iloc[-1]
 
-    score = (mom_val * 100) - (rsi_val - 50) * 0.5
+    sentiment = sentiment_score(ticker)
 
-    confidence = min(100, abs(score) * 5)
+    # -------------------------
+    # SCORE MODEL (RISK + RETURN)
+    # -------------------------
 
-    if mom_val > 0 and rsi_val < 70:
+    score = (
+        (mom_val * 120) +
+        (sentiment * 50) +
+        (candle_val * 80)
+    ) - (rsi_val - 50) * 0.8
+
+    confidence = min(100, abs(score))
+
+    # -------------------------
+    # SIGNAL LOGIC
+    # -------------------------
+
+    if mom_val > 0 and rsi_val < 70 and sentiment > 0:
         signal = "BUY"
-    elif mom_val < 0 or rsi_val > 75:
+
+    elif rsi_val > 75 or mom_val < 0:
         signal = "SELL"
+
     else:
         signal = "HOLD"
 
-    return signal, confidence, score
+    # -------------------------
+    # RISK FILTER
+    # -------------------------
 
+    risk = "LOW"
 
-# -----------------------------
-# DATA FETCH
-# -----------------------------
-
-def fetch(symbol):
-    df = yf.download(symbol, period="5d", interval="15m")
-    df = df.dropna()
-
-    signal, confidence, score = generate_signal(df)
-
-    price = float(df["Close"].iloc[-1])
-
-    candles = [
-        {
-            "time": int(row.Index.timestamp()),
-            "open": float(row.Open),
-            "high": float(row.High),
-            "low": float(row.Low),
-            "close": float(row.Close)
-        }
-        for row in df.itertuples()
-    ]
+    if rsi_val > 80:
+        risk = "HIGH"
+    elif candle_val > 0.7:
+        risk = "MEDIUM"
 
     return {
-        "ticker": symbol,
-        "price": price,
+        "ticker": ticker,
+        "price": float(price),
         "signal": signal,
         "confidence": round(confidence, 2),
-        "score": round(score, 4),
-        "candles": candles
+        "risk": risk,
+        "sentiment": round(sentiment, 3),
+        "score": round(score, 3)
     }
 
 
-# -----------------------------
-# PAPER TRADING ENGINE
-# -----------------------------
+# -------------------------
+# DATA FETCH
+# -------------------------
 
-def execute_trade(symbol, signal, price, confidence):
+def get_stock(ticker):
 
-    portfolio = CACHE["portfolio"]
+    df = yf.download(ticker, period="5d", interval="15m")
+    df = df.dropna()
 
-    position_size = (portfolio["cash"] * (confidence / 100)) * 0.1
-
-    if signal == "BUY" and portfolio["cash"] > position_size:
-
-        qty = position_size / price
-
-        portfolio["cash"] -= position_size
-
-        portfolio["positions"][symbol] = portfolio["positions"].get(symbol, 0) + qty
-
-        portfolio["trades"].append({
-            "type": "BUY",
-            "symbol": symbol,
-            "qty": qty,
-            "price": price,
-            "time": time.time()
-        })
-
-    elif signal == "SELL" and symbol in portfolio["positions"]:
-
-        qty = portfolio["positions"][symbol]
-
-        proceeds = qty * price
-
-        portfolio["cash"] += proceeds
-
-        del portfolio["positions"][symbol]
-
-        portfolio["trades"].append({
-            "type": "SELL",
-            "symbol": symbol,
-            "qty": qty,
-            "price": price,
-            "time": time.time()
-        })
+    return analyze(df, ticker)
 
 
-# -----------------------------
-# LIVE UPDATE LOOP
-# -----------------------------
+def rank_stocks():
 
-def update_loop():
+    results = [get_stock(t) for t in TICKERS]
 
-    while True:
+    # risk-adjusted ranking
+    ranked = sorted(
+        results,
+        key=lambda x: x["confidence"] / (1 + (1 if x["risk"] == "HIGH" else 0)),
+        reverse=True
+    )
 
-        for t in TICKERS:
-
-            data = fetch(t)
-
-            CACHE["prices"][t] = data
-
-            execute_trade(
-                t,
-                data["signal"],
-                data["price"],
-                data["confidence"]
-            )
-
-        time.sleep(30)
-
-
-threading.Thread(target=update_loop, daemon=True).start()
-
-
-# -----------------------------
-# API ROUTES
-# -----------------------------
-
-@app.route("/")
-def dashboard():
-    return jsonify(CACHE["prices"])
-
-
-@app.route("/portfolio")
-def portfolio():
-    return jsonify(CACHE["portfolio"])
-
-
-@app.route("/health")
-def health():
-    return jsonify({"status": "running"})
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    return ranked
